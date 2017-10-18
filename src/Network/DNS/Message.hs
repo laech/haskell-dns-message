@@ -55,16 +55,18 @@ instance Binary Message where
 
   get = do
     messageOffset <- bytesRead
+
     [identifier, flags] <- replicateM 2 getWord16be
     [qdcount, ancount, nscount, arcount] <-
       replicateM 4 (fromEnum <$> getWord16be)
 
+    let getRRs = getResourceRecords messageOffset
     evalStateT
       (Message identifier flags
         <$> getQuestions messageOffset qdcount
-        <*> getResourceRecords messageOffset ancount
-        <*> getResourceRecords messageOffset nscount
-        <*> getResourceRecords messageOffset arcount)
+        <*> getRRs ancount
+        <*> getRRs nscount
+        <*> getRRs arcount)
       Map.empty
 
   put = undefined
