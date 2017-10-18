@@ -71,6 +71,10 @@ instance Binary Message where
 
   put = undefined
 
+-- A map of DNS labels where keys are relative offsets from the beginning of
+-- the message, and values are labels at the offsets
+type OffsetLabelMap = Map Int64 [Label]
+
 getQuestions :: Int64 -> Int -> StateT OffsetLabelMap Get [Question]
 getQuestions messageOffset count = replicateM count (getQuestion messageOffset)
 
@@ -93,10 +97,6 @@ getResourceRecord messageOffset = StateT $ \map -> do
   rlength <- getWord16be
   rdata <- getByteString $ fromIntegral rlength
   return (ResourceRecord rname rtype rclass rttl rdata, map')
-
--- A map of DNS labels where keys are relative offsets from the beginning of
--- the message, and values are labels at the offsets
-type OffsetLabelMap = Map Int64 [Label]
 
 getDomain :: Int64 -> StateT OffsetLabelMap Get Domain
 getDomain messageOffset = StateT $ \map -> do
