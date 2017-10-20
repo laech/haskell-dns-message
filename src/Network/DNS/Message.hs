@@ -6,6 +6,14 @@ module Network.DNS.Message
   , ResourceRecord(..)
   , Domain(..)
   , Label
+  , mklabel
+  , classIN
+  , classANY
+  , typeA
+  , typeTXT
+  , typeAAAA
+  , typeOPT
+  , typeANY
   ) where
 
 import           Control.Monad
@@ -15,6 +23,7 @@ import           Data.Binary.Get
 import           Data.Binary.Put
 import           Data.Bits
 import           Data.ByteString           as ByteString
+import           Data.ByteString.Char8     as Char8
 import           Data.Int
 import           Data.List                 as List
 import           Data.Map                  as Map
@@ -27,13 +36,13 @@ data Message = Message
   , answers     :: [ResourceRecord]
   , authorities :: [ResourceRecord]
   , additionals :: [ResourceRecord]
-  } deriving (Show)
+  } deriving (Show, Eq)
 
 data Question = Question
   { qname  :: Domain
   , qtype  :: Word16
   , qclass :: Word16
-  } deriving (Show)
+  } deriving (Show, Eq)
 
 data ResourceRecord = ResourceRecord
   { rname  :: Domain
@@ -41,15 +50,27 @@ data ResourceRecord = ResourceRecord
   , rclass :: Word16
   , rttl   :: Word32
   , rdata  :: ByteString
-  } deriving (Show)
+  } deriving (Show, Eq)
 
 newtype Label =
   Label ByteString
-  deriving (Show)
+  deriving (Show, Eq)
 
 newtype Domain =
   Domain [Label]
-  deriving (Show)
+  deriving (Show, Eq)
+
+classIN  =   1 :: Word16
+classANY = 255 :: Word16
+
+typeA    =   1 :: Word16
+typeTXT  =  16 :: Word16
+typeAAAA =  28 :: Word16
+typeOPT  =  41 :: Word16
+typeANY  = 255 :: Word16
+
+mklabel :: String -> Label
+mklabel = Label . Char8.pack -- TODO
 
 instance Binary Message where
 
