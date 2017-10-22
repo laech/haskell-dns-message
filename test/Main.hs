@@ -1,4 +1,4 @@
-import           Data.Binary
+import           Data.Binary.Get
 import           Data.ByteString       as B
 import           Data.ByteString.Char8 as C
 import           Data.ByteString.Lazy  as L
@@ -8,10 +8,11 @@ import           Test.HUnit
 testDecode :: FilePath -> Message -> Test
 testDecode path expected =
   TestCase $ do
-    result <- decodeFileOrFail path
+    input <- L.readFile path
+    let result = runGetOrFail getMessage input
     case result of
-      Left info    -> assertFailure (show info)
-      Right actual -> assertEqual "" expected actual
+      Left (_, _, info)    -> assertFailure (show info)
+      Right (_, _, actual) -> assertEqual "" expected actual
 
 main =
   runTestTT $

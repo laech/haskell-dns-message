@@ -14,13 +14,12 @@ module Network.DNS.Message
   , typeAAAA
   , typeOPT
   , typeANY
+  , getMessage
   ) where
 
 import           Control.Monad
 import           Control.Monad.Trans.State
-import           Data.Binary
 import           Data.Binary.Get
-import           Data.Binary.Put
 import           Data.Bits
 import           Data.ByteString           as ByteString
 import           Data.ByteString.Char8     as Char8
@@ -72,44 +71,41 @@ typeANY  = 255 :: Word16
 mklabel :: String -> Label
 mklabel = Label . Char8.pack -- TODO
 
-instance Binary Message where
+getMessage :: Get Message
+getMessage = do
+  messageOffset <- bytesRead
 
-  get = do
-    messageOffset <- bytesRead
+  [identifier, flags] <- replicateM 2 getWord16be
+  [qdcount, ancount, nscount, arcount] <-
+    replicateM 4 (fromEnum <$> getWord16be)
 
-    [identifier, flags] <- replicateM 2 getWord16be
-    [qdcount, ancount, nscount, arcount] <-
-      replicateM 4 (fromEnum <$> getWord16be)
-
-    let getRRs = getResourceRecords messageOffset
-    evalStateT
-      (Message identifier flags
-        <$> getQuestions messageOffset qdcount
-        <*> getRRs ancount
-        <*> getRRs nscount
-        <*> getRRs arcount)
-      Map.empty
-
-  put = undefined
+  let getRRs = getResourceRecords messageOffset
+  evalStateT
+    (Message identifier flags
+      <$> getQuestions messageOffset qdcount
+      <*> getRRs ancount
+      <*> getRRs nscount
+      <*> getRRs arcount)
+    Map.empty
 
 -- A map of DNS labels where keys are relative offsets from the beginning of
 -- the message, and values are labels at the offsets
-type OffsetLabelMap = Map Int64 [Label]
+type OffsetLabelMap = Map ByteOffset [Label]
 
-getQuestions :: Int64 -> Int -> StateT OffsetLabelMap Get [Question]
+getQuestions :: ByteOffset -> Int -> StateT OffsetLabelMap Get [Question]
 getQuestions messageOffset count = replicateM count (getQuestion messageOffset)
 
-getQuestion :: Int64 -> StateT OffsetLabelMap Get Question
+getQuestion :: ByteOffset -> StateT OffsetLabelMap Get Question
 getQuestion messageOffset = StateT $ \map -> do
   (qname, map') <- runStateT (getDomain messageOffset) map
   qtype <- getWord16be
   qclass <- getWord16be
   return (Question qname qtype qclass, map')
 
-getResourceRecords :: Int64 -> Int -> StateT OffsetLabelMap Get [ResourceRecord]
+getResourceRecords :: ByteOffset -> Int -> StateT OffsetLabelMap Get [ResourceRecord]
 getResourceRecords messageOffset count = replicateM count (getResourceRecord messageOffset)
 
-getResourceRecord :: Int64 -> StateT OffsetLabelMap Get ResourceRecord
+getResourceRecord :: ByteOffset -> StateT OffsetLabelMap Get ResourceRecord
 getResourceRecord messageOffset = StateT $ \map -> do
   (rname, map') <- runStateT (getDomain messageOffset) map
   rtype <- getWord16be
@@ -119,7 +115,7 @@ getResourceRecord messageOffset = StateT $ \map -> do
   rdata <- getByteString $ fromIntegral rlength
   return (ResourceRecord rname rtype rclass rttl rdata, map')
 
-getDomain :: Int64 -> StateT OffsetLabelMap Get Domain
+getDomain :: ByteOffset -> StateT OffsetLabelMap Get Domain
 getDomain messageOffset = StateT $ \map -> do
   offset <- bytesRead
   (labels, map') <- runStateT getLabels map
