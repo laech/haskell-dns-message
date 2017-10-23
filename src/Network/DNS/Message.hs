@@ -1,4 +1,5 @@
-{-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE BinaryLiterals    #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Network.DNS.Message
   ( Message(..)
@@ -18,8 +19,12 @@ module Network.DNS.Message
   ) where
 
 import           Control.Monad
-import           Control.Monad.Trans.State
-import           Data.Binary.Get
+import           Control.Monad.Trans.State hiding (get, put)
+import qualified Control.Monad.Trans.State as State
+import           Data.Bimap                as Bimap
+import           Data.Binary.Get           (ByteOffset, Get)
+import qualified Data.Binary.Get           as Get
+import qualified Data.Binary.Put
 import           Data.Bits
 import           Data.ByteString           as ByteString
 import           Data.ByteString.Char8     as Char8
@@ -53,7 +58,7 @@ data ResourceRecord = ResourceRecord
 
 newtype Label =
   Label ByteString
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 newtype Domain =
   Domain [Label]
@@ -72,89 +77,90 @@ mklabel :: String -> Label
 mklabel = Label . Char8.pack -- TODO
 
 getMessage :: Get Message
-getMessage = do
-  messageOffset <- bytesRead
+getMessage = evalStateT get (MessageState 0 Bimap.empty)
 
-  [identifier, flags] <- replicateM 2 getWord16be
-  [qdcount, ancount, nscount, arcount] <-
-    replicateM 4 (fromEnum <$> getWord16be)
+type GetState a = StateT MessageState Get a
 
-  let getRRs = getResourceRecords messageOffset
-  evalStateT
-    (Message identifier flags
-      <$> getQuestions messageOffset qdcount
-      <*> getRRs ancount
-      <*> getRRs nscount
-      <*> getRRs arcount)
-    Map.empty
+class BinaryState a where
+  get :: StateT MessageState Get a
 
--- A map of DNS labels where keys are relative offsets from the beginning of
--- the message, and values are labels at the offsets
-type OffsetLabelMap = Map ByteOffset [Label]
+data MessageState = MessageState
+  { offset :: ByteOffset
+  , labels :: Bimap ByteOffset [Label]
+  } deriving (Show)
 
-getQuestions :: ByteOffset -> Int -> StateT OffsetLabelMap Get [Question]
-getQuestions messageOffset count = replicateM count (getQuestion messageOffset)
+increment :: Get a -> Int -> GetState a
+increment g n = StateT $ \s -> do
+  a <- g
+  return (a, s { offset = offset s + fromIntegral n })
 
-getQuestion :: ByteOffset -> StateT OffsetLabelMap Get Question
-getQuestion messageOffset = StateT $ \map -> do
-  (qname, map') <- runStateT (getDomain messageOffset) map
-  qtype <- getWord16be
-  qclass <- getWord16be
-  return (Question qname qtype qclass, map')
+getWord8 = increment Get.getWord8 1
+getWord16 = increment Get.getWord16be 2
+getWord32 = increment Get.getWord32be 4
+getByteString n = increment (Get.getByteString n) n
 
-getResourceRecords :: ByteOffset -> Int -> StateT OffsetLabelMap Get [ResourceRecord]
-getResourceRecords messageOffset count = replicateM count (getResourceRecord messageOffset)
+instance BinaryState Message where
+  get = do
+    [identifier, flags] <- replicateM 2 getWord16
+    [qdcount, ancount, nscount, arcount] <- replicateM 4 (fromEnum <$> getWord16)
+    Message identifier flags
+        <$> replicateM qdcount get
+        <*> replicateM ancount get
+        <*> replicateM nscount get
+        <*> replicateM arcount get
 
-getResourceRecord :: ByteOffset -> StateT OffsetLabelMap Get ResourceRecord
-getResourceRecord messageOffset = StateT $ \map -> do
-  (rname, map') <- runStateT (getDomain messageOffset) map
-  rtype <- getWord16be
-  rclass <- getWord16be
-  rttl <- getWord32be
-  rlength <- getWord16be
-  rdata <- getByteString $ fromIntegral rlength
-  return (ResourceRecord rname rtype rclass rttl rdata, map')
+instance BinaryState Question where
+  get = do
+    qname <- get
+    qtype <- getWord16
+    qclass <- getWord16
+    return $ Question qname qtype qclass
 
-getDomain :: ByteOffset -> StateT OffsetLabelMap Get Domain
-getDomain messageOffset = StateT $ \map -> do
-  offset <- bytesRead
-  (labels, map') <- runStateT getLabels map
-  return (Domain labels, Map.insert (offset - messageOffset) labels map')
+instance BinaryState ResourceRecord where
+  get = do
+    rname <- get
+    rtype <- getWord16
+    rclass <- getWord16
+    rttl <- getWord32
+    rlength <- getWord16
+    rdata <- getByteString $ fromIntegral rlength
+    return $ ResourceRecord rname rtype rclass rttl rdata
 
-getLabels :: StateT OffsetLabelMap Get [Label]
-getLabels = StateT $ \map -> do
-  (result, map') <- runStateT getLabel map
-  case result of
-    ([], _)         -> return ([], map')
-    (labels, False) -> return (labels, map')
-    (labels, True)  -> runStateT ((labels++) <$> getLabels) map'
+instance BinaryState Domain where
+  get = Domain <$> get
 
-getLabel :: StateT OffsetLabelMap Get ([Label], Bool)
-getLabel = StateT $ \map -> do
-  prefix <- getWord8
-  let high2b = prefix `shiftR` 6 .&. 0b11
-      length = prefix .&. 0b00111111
-  case high2b of
-    0b00 -> readLabel length map
-    0b11 -> findLabel length map
-    0b01 -> fail "TODO 0b01"
-    0b10 -> fail "TODO 0b10"
+instance BinaryState [Label] where
+  get = do
+    offset <- offset <$> State.get
+    word <- getWord8
+    let high2b = word `shiftR` 6 .&. 0b11
+        length = word .&. 0b00111111
 
-readLabel :: Word8 -> OffsetLabelMap -> Get (([Label], Bool), OffsetLabelMap)
-readLabel length map = do
-  bs <- getByteString (fromIntegral length)
-  return $ if ByteString.null bs
-  then (([], False), map)
-  else (([Label bs], True), map)
+    case high2b of
+      0b01 -> fail "Unsupported obsolete label type: 01"
+      0b10 -> fail "Invalid label type: 10"
+      0b11 -> findLabels length
+      0b00 -> do
+        string <- getByteString (fromIntegral length)
+        if ByteString.null string
+        then return []
+        else (Label string :) <$> get >>= addLabels offset
 
-findLabel :: Word8 -> OffsetLabelMap -> Get (([Label], Bool), OffsetLabelMap)
-findLabel length0 map = do
-  length1 <- getWord8
-  let pointer = combineToInt64 length0 length1
-  case Map.lookup (combineToInt64 length0 length1) map of
-    Just x  -> return ((x, False), map)
-    Nothing -> fail $ "Invalid pointer " ++ show pointer ++ ", valid labels are: " ++ show map
+    where
+      addLabels :: ByteOffset -> [Label] -> GetState [Label]
+      addLabels offset xs = do
+        modify (\s -> s {labels = Bimap.insert offset xs (labels s)})
+        return xs
 
-combineToInt64 :: Word8 -> Word8 -> Int64
-combineToInt64 high low =
-  fromIntegral $ (fromIntegral high :: Word16) `shiftL` 8 + fromIntegral low
+      findLabels :: Word8 -> GetState [Label]
+      findLabels length0 = do
+        labels <- labels <$> State.get
+        offset <- combineToInt64 length0 <$> getWord8
+        case Bimap.lookup offset labels of
+          Just x  -> return x
+          Nothing -> fail $ "Invalid pointer " ++ show offset ++
+            ", valid labels are: " ++ show labels
+
+      combineToInt64 :: Word8 -> Word8 -> Int64
+      combineToInt64 high low =
+        fromIntegral $ (fromIntegral high :: Word16) `shiftL` 8 + fromIntegral low
