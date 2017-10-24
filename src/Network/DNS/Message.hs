@@ -1,5 +1,5 @@
-{-# LANGUAGE BinaryLiterals    #-}
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE BinaryLiterals      #-}
+{-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Network.DNS.Message
@@ -17,6 +17,7 @@ module Network.DNS.Message
   , typeOPT
   , typeANY
   , getMessage
+  , putMessage
   ) where
 
 import           Control.Monad
@@ -25,7 +26,7 @@ import qualified Control.Monad.Trans.State as State
 import           Data.Bimap                as Bimap
 import           Data.Binary.Get           (ByteOffset, Get)
 import qualified Data.Binary.Get           as Get
-import           Data.Binary.Put           (PutM)
+import           Data.Binary.Put           (PutM, Put)
 import qualified Data.Binary.Put           as Put
 import           Data.Bits
 import           Data.ByteString           as ByteString
@@ -81,6 +82,9 @@ mklabel = Label . Char8.pack -- TODO
 getMessage :: Get Message
 getMessage = evalStateT get (MessageState 0 Bimap.empty)
 
+putMessage :: Message -> Put
+putMessage message = evalStateT (put message) (MessageState 0 Bimap.empty)
+
 type GetState a = StateT MessageState Get a
 type PutState a = StateT MessageState PutM a
 
@@ -115,26 +119,36 @@ instance BinaryState Word32 where
 
 instance BinaryState Message where
   get = do
-    [identifier, flags] <- replicateM 2 get
-    [qdcount, ancount, nscount, arcount] <-
-      replicateM 4 (fromEnum <$> (get :: GetState Word16))
+    [identifier, flags, qdcount, ancount, nscount, arcount] <-
+      replicateM 6 get
+      
+    let getN n = replicateM (fromEnum n) get
     Message identifier flags
-        <$> replicateM qdcount get
-        <*> replicateM ancount get
-        <*> replicateM nscount get
-        <*> replicateM arcount get
+        <$> getN qdcount
+        <*> getN ancount
+        <*> getN nscount
+        <*> getN arcount
 
   put (Message identifier flags questions answers authorities additionals) = do
     put identifier
     put flags
-    put (fromIntegral $ List.length questions :: Word16) -- TODO check max
-    put (fromIntegral $ List.length answers :: Word16)
-    put (fromIntegral $ List.length authorities :: Word16)
-    put (fromIntegral $ List.length additionals :: Word16)
+
+    putLength questions
+    putLength answers
+    putLength authorities
+    putLength additionals
+
     mapM_ put questions
     mapM_ put answers
     mapM_ put authorities
     mapM_ put additionals
+
+    where
+      putLength xs =
+        let len = List.length questions
+        in if len > fromIntegral (maxBound :: Word16)
+        then fail "List to large"
+        else put (fromIntegral len :: Word16)
 
 instance BinaryState Question where
   get = Question <$> get <*> get <*> get
@@ -157,7 +171,6 @@ instance BinaryState ResourceRecord where
     put rclass
     put rttl
     putData rdata -- TODO
-    putByteString rdata
     where
       putData rdata =
         if ByteString.length rdata > fromIntegral (maxBound :: Word16)
@@ -209,18 +222,21 @@ instance BinaryState [Label] where
     labels <- labels <$> State.get
     case Bimap.lookupR xs labels of
       Just offset -> putPointer offset
-      Nothing -> mapM_ putLabel xs
+      Nothing     -> mapM_ putLabel xs >> put (0 :: Word8)
 
     where
-      putPointer :: ByteOffset -> PutState ()
-      putPointer offset =
-        if offset > 0b00111111
-        then fail $ "Invalid offset " ++ show offset
-        else put (0b11000000 .&. fromIntegral offset :: Word8)
 
-      putLabel :: Label -> PutState ()
-      putLabel (Label string) =
-        if ByteString.length string > 0b00111111
+      putPointer offset =
+        if offset > 0b0011111111111111
+        then fail $ "Invalid offset " ++ show offset
+        else put (0b1100000000000000 `xor` (fromIntegral offset :: Word16))
+
+      putLabel label@(Label string) = do
+        putLabelLength label
+        putByteString string
+
+      putLabelLength (Label string) =
+        let length = ByteString.length string
+        in if length > 0b00111111
         then fail "Label too long" -- TODO
-        else put (fromIntegral $ ByteString.length string :: Word8) >>
-             putByteString string
+        else put (fromIntegral length :: Word8)
