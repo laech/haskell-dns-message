@@ -1,4 +1,5 @@
 import           Data.Binary.Get
+import           Data.Binary.Put
 import           Data.ByteString       as B
 import           Data.ByteString.Char8 as C
 import           Data.ByteString.Lazy  as L
@@ -14,10 +15,55 @@ testDecode path expected =
       Left (_, _, info)    -> assertFailure (show info)
       Right (_, _, actual) -> assertEqual "" expected actual
 
+testPutThenGet :: Message -> Test
+testPutThenGet expected = TestLabel ("put . get = id for " ++ show expected) $ TestCase $ assertEqual "" expected (runGet getMessage $ runPut $ putMessage expected)
+
 main =
   runTestTT $
   TestList
-    [ testDecodeQueryTypeA
+    [ testPutThenGet
+      Message
+      { identifier = 1
+      , flags = 101
+      , questions = []
+      , answers = []
+      , authorities = []
+      , additionals = []
+      }
+
+    , testPutThenGet
+      Message
+      { identifier = 11
+      , flags = 1010
+      , questions =
+        [ Question
+          { qname = Domain []
+          , qtype = typeA
+          , qclass = classIN
+          }
+        ]
+      , answers = []
+      , authorities = []
+      , additionals = []
+      }
+
+    , testPutThenGet
+      Message
+      { identifier = 11
+      , flags = 1010
+      , questions =
+        [ Question
+          { qname = Domain [mklabel "google", mklabel "com"]
+          , qtype = typeA
+          , qclass = classIN
+          }
+        ]
+      , answers = []
+      , authorities = []
+      , additionals = []
+      }
+
+    , testDecodeQueryTypeA
     , testDecodeResponseTypeA
     , testDecodeQueryTypeAny
 --    , testDecodeResponseTypeAny
