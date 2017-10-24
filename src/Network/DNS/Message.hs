@@ -1,5 +1,6 @@
 {-# LANGUAGE BinaryLiterals    #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Network.DNS.Message
   ( Message(..)
@@ -24,7 +25,8 @@ import qualified Control.Monad.Trans.State as State
 import           Data.Bimap                as Bimap
 import           Data.Binary.Get           (ByteOffset, Get)
 import qualified Data.Binary.Get           as Get
-import qualified Data.Binary.Put
+import           Data.Binary.Put           (PutM)
+import qualified Data.Binary.Put           as Put
 import           Data.Bits
 import           Data.ByteString           as ByteString
 import           Data.ByteString.Char8     as Char8
@@ -80,59 +82,97 @@ getMessage :: Get Message
 getMessage = evalStateT get (MessageState 0 Bimap.empty)
 
 type GetState a = StateT MessageState Get a
+type PutState a = StateT MessageState PutM a
 
 class BinaryState a where
-  get :: StateT MessageState Get a
+  get :: GetState a
+  put :: a -> PutState ()
 
 data MessageState = MessageState
   { offset :: ByteOffset
   , labels :: Bimap ByteOffset [Label]
   } deriving (Show)
 
-increment :: Get a -> Int -> GetState a
-increment g n = StateT $ \s -> do
-  a <- g
+increment :: (Monad m) => Int -> m a -> StateT MessageState m a
+increment n m = StateT $ \s -> do
+  a <- m
   return (a, s { offset = offset s + fromIntegral n })
 
-getWord8 = increment Get.getWord8 1
-getWord16 = increment Get.getWord16be 2
-getWord32 = increment Get.getWord32be 4
-getByteString n = increment (Get.getByteString n) n
+getByteString n = increment n (Get.getByteString n)
+putByteString s = increment (ByteString.length s) (Put.putByteString s)
+
+instance BinaryState Word8 where
+  get = increment 1   Get.getWord8
+  put = increment 1 . Put.putWord8
+
+instance BinaryState Word16 where
+  get = increment 2   Get.getWord16be
+  put = increment 2 . Put.putWord16be
+
+instance BinaryState Word32 where
+  get = increment 4   Get.getWord32be
+  put = increment 4 . Put.putWord32be
 
 instance BinaryState Message where
   get = do
-    [identifier, flags] <- replicateM 2 getWord16
-    [qdcount, ancount, nscount, arcount] <- replicateM 4 (fromEnum <$> getWord16)
+    [identifier, flags] <- replicateM 2 get
+    [qdcount, ancount, nscount, arcount] <-
+      replicateM 4 (fromEnum <$> (get :: GetState Word16))
     Message identifier flags
         <$> replicateM qdcount get
         <*> replicateM ancount get
         <*> replicateM nscount get
         <*> replicateM arcount get
 
+  put (Message identifier flags questions answers authorities additionals) = do
+    put identifier
+    put flags
+    put (fromIntegral $ List.length questions :: Word16) -- TODO check max
+    put (fromIntegral $ List.length answers :: Word16)
+    put (fromIntegral $ List.length authorities :: Word16)
+    put (fromIntegral $ List.length additionals :: Word16)
+    mapM_ put questions
+    mapM_ put answers
+    mapM_ put authorities
+    mapM_ put additionals
+
 instance BinaryState Question where
-  get = do
-    qname <- get
-    qtype <- getWord16
-    qclass <- getWord16
-    return $ Question qname qtype qclass
+  get = Question <$> get <*> get <*> get
+  put (Question qname qtype qclass) = do
+    put qname
+    put qtype
+    put qclass
 
 instance BinaryState ResourceRecord where
-  get = do
-    rname <- get
-    rtype <- getWord16
-    rclass <- getWord16
-    rttl <- getWord32
-    rlength <- getWord16
-    rdata <- getByteString $ fromIntegral rlength
-    return $ ResourceRecord rname rtype rclass rttl rdata
+  get = ResourceRecord
+    <$> get
+    <*> get
+    <*> get
+    <*> get
+    <*> (fromIntegral <$> (get :: GetState Word16) >>= getByteString)
+
+  put (ResourceRecord rname rtype rclass rttl rdata) = do
+    put rname
+    put rtype
+    put rclass
+    put rttl
+    putData rdata -- TODO
+    putByteString rdata
+    where
+      putData rdata =
+        if ByteString.length rdata > fromIntegral (maxBound :: Word16)
+        then fail "Data too big" -- TODO
+        else put (fromIntegral (ByteString.length rdata) :: Word16) >>
+             putByteString rdata
 
 instance BinaryState Domain where
   get = Domain <$> get
+  put (Domain xs) = put xs
 
 instance BinaryState [Label] where
   get = do
     offset <- offset <$> State.get
-    word <- getWord8
+    word <- get
     let high2b = word `shiftR` 6 .&. 0b11
         length = word .&. 0b00111111
 
@@ -155,7 +195,7 @@ instance BinaryState [Label] where
       findLabels :: Word8 -> GetState [Label]
       findLabels length0 = do
         labels <- labels <$> State.get
-        offset <- combineToInt64 length0 <$> getWord8
+        offset <- combineToInt64 length0 <$> get
         case Bimap.lookup offset labels of
           Just x  -> return x
           Nothing -> fail $ "Invalid pointer " ++ show offset ++
@@ -164,3 +204,23 @@ instance BinaryState [Label] where
       combineToInt64 :: Word8 -> Word8 -> Int64
       combineToInt64 high low =
         fromIntegral $ (fromIntegral high :: Word16) `shiftL` 8 + fromIntegral low
+
+  put xs = do
+    labels <- labels <$> State.get
+    case Bimap.lookupR xs labels of
+      Just offset -> putPointer offset
+      Nothing -> mapM_ putLabel xs
+
+    where
+      putPointer :: ByteOffset -> PutState ()
+      putPointer offset =
+        if offset > 0b00111111
+        then fail $ "Invalid offset " ++ show offset
+        else put (0b11000000 .&. fromIntegral offset :: Word8)
+
+      putLabel :: Label -> PutState ()
+      putLabel (Label string) =
+        if ByteString.length string > 0b00111111
+        then fail "Label too long" -- TODO
+        else put (fromIntegral $ ByteString.length string :: Word8) >>
+             putByteString string
