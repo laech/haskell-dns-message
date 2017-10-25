@@ -1,0 +1,4 @@
+- *.pcap is the Wireshark capture file
+- *.query is the exported from the pcap file via right click
+  on the DNS section and 'Export Packet Bytes...' in Wireshark
+- *.response is same as above but for the response
