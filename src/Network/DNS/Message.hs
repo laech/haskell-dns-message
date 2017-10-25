@@ -145,7 +145,7 @@ instance BinaryState Message where
 
     where
       putLength xs =
-        let len = List.length questions
+        let len = List.length xs
         in if len > fromIntegral (maxBound :: Word16)
         then fail "List to large"
         else put (fromIntegral len :: Word16)
