@@ -43,9 +43,6 @@ testPutGet path expected = TestLabel "testPutGet" $ TestCase $ do
 printHex :: L.ByteString -> String
 printHex = L.foldr (\w result -> showHex w (' ' : result)) ""
 
-testPutThenGet :: Message -> Test
-testPutThenGet expected = TestLabel ("put . get = id for " ++ show expected) $ TestCase $ assertEqual "" expected (runGet getMessage $ runPut $ putMessage expected)
-
 main =
   runTestTT $
   TestList
